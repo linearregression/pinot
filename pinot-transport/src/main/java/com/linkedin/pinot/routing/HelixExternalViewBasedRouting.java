@@ -89,6 +89,7 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
   private final HelixExternalViewBasedTimeBoundaryService _timeBoundaryService;
   private final RoutingTableSelector _routingTableSelector;
   private final HelixManager _helixManager;
+  private static final int INVALID_EXTERNAL_VIEW_VERSION = Integer.MIN_VALUE;
 
   private BrokerMetrics _brokerMetrics;
 
@@ -195,11 +196,9 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
   public void markDataResourceOnline(String tableName, ExternalView externalView,
       List<InstanceConfig> instanceConfigList) {
     if (externalView == null) {
-      return;
-    }
-
-    // Check if there are relevant changes to the state or if we can skip this update
-    if (!isRoutingTableRebuildRequired(tableName, externalView, instanceConfigList)) {
+      // It is possible for us to get a request to serve a table for which there is no ideal state. In this case, just
+      // keep a bogus last seen external view version to force a rebuild the next time we see an external view
+      _lastKnownExternalViewVersionMap.put(tableName, INVALID_EXTERNAL_VIEW_VERSION);
       return;
     }
 
@@ -283,6 +282,12 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
             "Routing table for table {} requires rebuild due to at least one instance changing state (instance {} enabled: {} -> {}; shutting down {} -> {})",
             tableName, instanceName, wasEnabled, isEnabled, wasShuttingDown, isShuttingDown);
         return true;
+      } else {
+        // Update the instance config in our last known instance config, since it hasn't changed
+        _lastKnownInstanceConfigs.put(instanceName, currentInstanceConfig);
+        for (String tableForInstance : _tablesForInstance.get(instanceName)) {
+          _lastKnownInstanceConfigsForTable.get(tableForInstance).put(instanceName, currentInstanceConfig);
+        }
       }
     }
 
@@ -341,6 +346,9 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
 
       // Save the instance configs used so that we can avoid unnecessary routing table updates later
       _lastKnownInstanceConfigsForTable.put(tableName, relevantInstanceConfigs);
+      for (InstanceConfig instanceConfig : relevantInstanceConfigs.values()) {
+        _lastKnownInstanceConfigs.put(instanceConfig.getInstanceName(), instanceConfig);
+      }
 
       // Ensure this table is registered with all relevant instances
       for (String instanceName : relevantInstanceConfigs.keySet()) {
@@ -454,6 +462,7 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
 
     // Fetch the instance configs and update the routing tables for the tables that changed
     if (!tablesThatChanged.isEmpty()) {
+      // TODO jfim: Only fetch relevant instance configs
       List<InstanceConfig> instanceConfigs = helixDataAccessor.getChildValues(propertyKeyBuilder.instanceConfigs());
 
       for (String tableThatChanged : tablesThatChanged) {
