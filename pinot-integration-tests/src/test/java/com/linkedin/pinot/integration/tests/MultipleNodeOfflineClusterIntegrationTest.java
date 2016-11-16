@@ -23,7 +23,7 @@ import java.io.File;
  *
  */
 public class MultipleNodeOfflineClusterIntegrationTest extends OfflineClusterIntegrationTest {
-  private static final int BROKER_COUNT = 3;
+  private static final int BROKER_COUNT = 1;
   private static final int SERVER_COUNT = 5;
   private static final int SERVER_INSTANCE_COUNT = SERVER_COUNT;
   private static final int BROKER_INSTANCE_COUNT = BROKER_COUNT;

@@ -223,7 +223,7 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
     int externalViewRecordVersion = externalView.getRecord().getVersion();
     int lastKnownExternalViewVersion = _lastKnownExternalViewVersionMap.get(tableName);
 
-    if (externalViewRecordVersion != lastKnownExternalViewVersion) {
+    if (externalViewRecordVersion != lastKnownExternalViewVersion || lastKnownExternalViewVersion == INVALID_EXTERNAL_VIEW_VERSION) {
       LOGGER.info(
           "Routing table for table {} requires rebuild due to external view change (current version {}, last known version {})",
           tableName, externalViewRecordVersion, lastKnownExternalViewVersion);
@@ -372,6 +372,9 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
       }
     } catch (Exception e) {
       LOGGER.error("Failed to compute/update the routing table", e);
+
+      // Mark the routing table as needing a rebuild
+      _lastKnownExternalViewVersionMap.put(tableName, INVALID_EXTERNAL_VIEW_VERSION);
     }
 
     try {
