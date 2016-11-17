@@ -533,7 +533,7 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
     long rebuildEndTime = System.currentTimeMillis();
 
     long endTime = System.currentTimeMillis();
-    LOGGER.warn(
+    LOGGER.info(
         "Processed external view change in {} ms (stat {} ms, EV check {} ms, IC fetch {} ms, rebuild {} ms), routing tables rebuilt for tables {}, {} / {} routing tables rebuilt",
         (endTime - startTime), (statEndTime - statStartTime), (evCheckEndTime - evCheckStartTime), icFetchTime,
         (rebuildEndTime - rebuildStartTime), tablesThatChanged, tablesThatChanged.size(), tablesServed.size());
@@ -621,7 +621,7 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
     }
     long endTime = System.currentTimeMillis();
 
-    LOGGER.warn(
+    LOGGER.info(
         "Processed instance config change in {} ms (stat {} ms, IC check {} ms, IC fetch {} ms, EV fetch {} ms, rebuild check {} ms, rebuild {} ms), {} / {} routing tables rebuilt",
         (endTime - startTime), (statFetchEnd - statFetchStart), (icConfigCheckEnd - icConfigCheckStart), icFetchTime,
         evFetchTime, rebuildCheckTime, buildTime, routingTablesRebuiltCount, _lastKnownExternalViewVersionMap.size());
