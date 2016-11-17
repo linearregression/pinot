@@ -196,8 +196,8 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
   public void markDataResourceOnline(String tableName, ExternalView externalView,
       List<InstanceConfig> instanceConfigList) {
     if (externalView == null) {
-      // It is possible for us to get a request to serve a table for which there is no ideal state. In this case, just
-      // keep a bogus last seen external view version to force a rebuild the next time we see an external view
+      // It is possible for us to get a request to serve a table for which there is no external view. In this case, just
+      // keep a bogus last seen external view version to force a rebuild the next time we see an external view.
       _lastKnownExternalViewVersionMap.put(tableName, INVALID_EXTERNAL_VIEW_VERSION);
       return;
     }
@@ -371,6 +371,7 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
         tablesForCurrentInstance.add(tableName);
       }
     } catch (Exception e) {
+      _brokerMetrics.addMeteredTableValue(tableName, BrokerMeter.ROUTING_TABLE_REBUILD_FAILURES, 1L);
       LOGGER.error("Failed to compute/update the routing table", e);
 
       // Mark the routing table as needing a rebuild
@@ -407,7 +408,11 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
 
       if (tableForTimeBoundaryUpdate != null) {
         LOGGER.info("Trying to compute time boundary service for table {}", tableForTimeBoundaryUpdate);
+        long timeBoundaryUpdateStart = System.currentTimeMillis();
         _timeBoundaryService.updateTimeBoundaryService(externalView);
+        long timeBoundaryUpdateEnd = System.currentTimeMillis();
+        LOGGER.info("Computed the time boundary for table {} in {} ms", tableForTimeBoundaryUpdate,
+            (timeBoundaryUpdateEnd - timeBoundaryUpdateStart));
       } else {
         LOGGER.info("No need to update time boundary for table {}", tableName);
       }
@@ -464,32 +469,35 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
   }
 
   public void processExternalViewChange() {
-    System.out.println("--------------------------------");
-    System.out.println("HelixExternalViewBasedRouting.processExternalViewChange");
-    System.out.println("--------------------------------");
-
     long startTime = System.currentTimeMillis();
-    // Get stats for all tables that we're serving
+
+    // Get list of tables that we're serving
+    List<String> tablesServed = new ArrayList<>(_lastKnownExternalViewVersionMap.keySet());
+
+    if (tablesServed.isEmpty()) {
+      return;
+    }
+
+    // Build list of external views to fetch
     HelixDataAccessor helixDataAccessor = _helixManager.getHelixDataAccessor();
     PropertyKey.Builder propertyKeyBuilder = helixDataAccessor.keyBuilder();
-    List<String> tablesServed = new ArrayList<>(_lastKnownExternalViewVersionMap.keySet());
-    List<String> externalViewPaths = new ArrayList<>(tablesServed.size());
 
+    List<String> externalViewPaths = new ArrayList<>(tablesServed.size());
     for (String tableName : tablesServed) {
       PropertyKey propertyKey = propertyKeyBuilder.externalView(tableName);
       externalViewPaths.add(propertyKey.getPath());
     }
 
-    long initTime = System.currentTimeMillis();
-
+    // Get znode stats for all tables that we're serving
+    long statStartTime = System.currentTimeMillis();
     Stat[] externalViewStats =
         helixDataAccessor.getBaseDataAccessor().getStats(externalViewPaths, AccessOption.PERSISTENT);
-
-    long statsTime = System.currentTimeMillis();
+    long statEndTime = System.currentTimeMillis();
 
     // Make a list of external views that changed
     List<String> tablesThatChanged = new ArrayList<>();
 
+    long evCheckStartTime = System.currentTimeMillis();
     for (int i = 0; i < externalViewStats.length; i++) {
       Stat externalViewStat = externalViewStats[i];
       if (externalViewStat != null) {
@@ -502,53 +510,38 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
         }
       }
     }
-
-    long changeTime = System.currentTimeMillis();
+    long evCheckEndTime = System.currentTimeMillis();
 
     // Fetch the instance configs and update the routing tables for the tables that changed
+    long icFetchTime = 0;
+    long rebuildStartTime = System.currentTimeMillis();
     if (!tablesThatChanged.isEmpty()) {
-      // TODO jfim: Only fetch relevant instance configs
+      // Fetch instance configs
+      long icFetchStart = System.currentTimeMillis();
       List<InstanceConfig> instanceConfigs = helixDataAccessor.getChildValues(propertyKeyBuilder.instanceConfigs());
-
-      long instanceConfigsTime = System.currentTimeMillis();
-
-
-      long rebuildCheckTimeMillis = 0L;
-      long rebuildTimeMillis = 0L;
+      long icFetchEnd = System.currentTimeMillis();
+      icFetchTime = icFetchEnd - icFetchStart;
 
       for (String tableThatChanged : tablesThatChanged) {
         // We ignore the external views given by Helix on external view change and fetch the latest version as our
         // version of Helix (0.6.5) does not batch external view change messages.
         ExternalView externalView = helixDataAccessor.getProperty(propertyKeyBuilder.externalView(tableThatChanged));
 
-        long rebuildCheckStart = System.currentTimeMillis();
-        final boolean routingTableRebuildRequired =
-            isRoutingTableRebuildRequired(tableThatChanged, externalView, instanceConfigs);
-        long rebuildCheckEnd = System.currentTimeMillis();
-        rebuildCheckTimeMillis += (rebuildCheckEnd - rebuildCheckStart);
-
-        if (routingTableRebuildRequired) {
-          long rebuildStart = System.currentTimeMillis();
-          buildRoutingTable(tableThatChanged, externalView, instanceConfigs);
-          long rebuildEnd = System.currentTimeMillis();
-          rebuildTimeMillis += (rebuildEnd - rebuildStart);
-        }
+        buildRoutingTable(tableThatChanged, externalView, instanceConfigs);
       }
-
-      System.out.println("build: " + rebuildTimeMillis);
-      System.out.println("bchk : " + rebuildCheckTimeMillis);
-      System.out.println("icfgs: " + (instanceConfigsTime - changeTime));
-    } else {
-      System.out.println("No change");
     }
+    long rebuildEndTime = System.currentTimeMillis();
 
-    System.out.println("chnge: " + (changeTime - startTime));
-    System.out.println("stat : " + (statsTime - initTime));
-    System.out.println("init : " + (initTime - startTime));
-    System.out.println("--------------------------------");
+    long endTime = System.currentTimeMillis();
+    LOGGER.warn(
+        "Processed external view change in {} ms (stat {} ms, EV check {} ms, IC fetch {} ms, rebuild {} ms), routing tables rebuilt for tables {}, {} / {} routing tables rebuilt",
+        (endTime - startTime), (statEndTime - statStartTime), (evCheckEndTime - evCheckStartTime), icFetchTime,
+        (rebuildEndTime - rebuildStartTime), tablesThatChanged, tablesThatChanged.size(), tablesServed.size());
   }
 
   public void processInstanceConfigChange() {
+    long startTime = System.currentTimeMillis();
+
     // Get stats for all relevant instance configs
     HelixDataAccessor helixDataAccessor = _helixManager.getHelixDataAccessor();
     PropertyKey.Builder propertyKeyBuilder = helixDataAccessor.keyBuilder();
@@ -560,10 +553,17 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
       instancePaths.add(propertyKey.getPath());
     }
 
+    if (instancePaths.isEmpty()) {
+      return;
+    }
+
+    long statFetchStart = System.currentTimeMillis();
     Stat[] instanceConfigStats =
         helixDataAccessor.getBaseDataAccessor().getStats(instancePaths, AccessOption.PERSISTENT);
+    long statFetchEnd = System.currentTimeMillis();
 
     // Make a list of instance configs that changed
+    long icConfigCheckStart = System.currentTimeMillis();
     List<String> instancesThatChanged = new ArrayList<>();
 
     for (int i = 0; i < instanceConfigStats.length; i++) {
@@ -579,23 +579,52 @@ public class HelixExternalViewBasedRouting implements RoutingTable {
       }
     }
 
-    // Make a list of all tables impacted by the instance config changes
-    Set<String> impactedTables = new HashSet<>();
+    // Make a list of all tables affected by the instance config changes
+    Set<String> affectedTables = new HashSet<>();
     for (String instanceName : instancesThatChanged) {
-      impactedTables.addAll(_tablesForInstance.get(instanceName));
+      affectedTables.addAll(_tablesForInstance.get(instanceName));
     }
+    long icConfigCheckEnd = System.currentTimeMillis();
 
     // Update the routing tables
-    if (!impactedTables.isEmpty()) {
+    long icFetchTime = 0;
+    long evFetchTime = 0;
+    long rebuildCheckTime = 0;
+    long buildTime = 0;
+    int routingTablesRebuiltCount = 0;
+    if (!affectedTables.isEmpty()) {
+      long icFetchStart = System.currentTimeMillis();
       List<InstanceConfig> instanceConfigs = helixDataAccessor.getChildValues(propertyKeyBuilder.instanceConfigs());
+      long icFetchEnd = System.currentTimeMillis();
+      icFetchTime = icFetchEnd - icFetchStart;
 
-      for (String tableName : impactedTables) {
+      for (String tableName : affectedTables) {
+        long evFetchStart = System.currentTimeMillis();
         ExternalView externalView = helixDataAccessor.getProperty(propertyKeyBuilder.externalView(tableName));
-        if (isRoutingTableRebuildRequired(tableName, externalView, instanceConfigs)) {
+        long evFetchEnd = System.currentTimeMillis();
+        evFetchTime += evFetchEnd - evFetchStart;
+
+        long rebuildCheckStart = System.currentTimeMillis();
+        final boolean routingTableRebuildRequired =
+            isRoutingTableRebuildRequired(tableName, externalView, instanceConfigs);
+        long rebuildCheckEnd = System.currentTimeMillis();
+        rebuildCheckTime += rebuildCheckEnd - rebuildCheckStart;
+
+        if (routingTableRebuildRequired) {
+          long rebuildStart = System.currentTimeMillis();
           buildRoutingTable(tableName, externalView, instanceConfigs);
+          long rebuildEnd = System.currentTimeMillis();
+          buildTime += rebuildEnd - rebuildStart;
+          routingTablesRebuiltCount++;
         }
       }
     }
+    long endTime = System.currentTimeMillis();
+
+    LOGGER.warn(
+        "Processed instance config change in {} ms (stat {} ms, IC check {} ms, IC fetch {} ms, EV fetch {} ms, rebuild check {} ms, rebuild {} ms), {} / {} routing tables rebuilt",
+        (endTime - startTime), (statFetchEnd - statFetchStart), (icConfigCheckEnd - icConfigCheckStart), icFetchTime,
+        evFetchTime, rebuildCheckTime, buildTime, routingTablesRebuiltCount, _lastKnownExternalViewVersionMap.size());
   }
 
   public TimeBoundaryService getTimeBoundaryService() {
