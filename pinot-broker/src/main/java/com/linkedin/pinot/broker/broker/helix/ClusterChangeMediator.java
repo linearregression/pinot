@@ -39,6 +39,9 @@ public class ClusterChangeMediator implements LiveInstanceChangeListener, Extern
 
   private final AtomicInteger _externalViewChangeCount = new AtomicInteger(0);
   private final AtomicInteger _instanceConfigChangeCount = new AtomicInteger(0);
+  private long _lastExternalViewUpdateTime = 0L;
+  private long _lastInstanceConfigUpdateTime = 0L;
+  private static final long MAX_TIME_BEFORE_IMMEDIATE_UPDATE_MILLIS = 30000L;
 
   private Thread _deferredClusterUpdater = null;
 
@@ -58,6 +61,7 @@ public class ClusterChangeMediator implements LiveInstanceChangeListener, Extern
           if (currentExternalViewChangeCount != lastExternalViewChangeCount) {
             try {
               _helixExternalViewBasedRouting.processExternalViewChange();
+              _lastExternalViewUpdateTime = System.currentTimeMillis();
             } catch (Exception e) {
               LOGGER.warn("Caught exception when processing external view change", e);
             }
@@ -70,6 +74,7 @@ public class ClusterChangeMediator implements LiveInstanceChangeListener, Extern
           if (currentInstanceConfigChangeCount != lastInstanceConfigChangeCount) {
             try {
               _helixExternalViewBasedRouting.processInstanceConfigChange();
+              _lastInstanceConfigUpdateTime = System.currentTimeMillis();
             } catch (Exception e) {
               LOGGER.warn("Caught exception when processing instance config change", e);
             }
@@ -98,7 +103,12 @@ public class ClusterChangeMediator implements LiveInstanceChangeListener, Extern
 
   @Override
   public void onExternalViewChange(List<ExternalView> externalViewList, NotificationContext changeContext) {
-    if (_deferredClusterUpdater != null && _deferredClusterUpdater.isAlive()) {
+    // If it's been a while since we last updated the external view, update the routing table immediately
+    if (MAX_TIME_BEFORE_IMMEDIATE_UPDATE_MILLIS < System.currentTimeMillis() - _lastExternalViewUpdateTime) {
+      _helixExternalViewBasedRouting.processExternalViewChange();
+      _lastExternalViewUpdateTime = System.currentTimeMillis();
+    } else if (_deferredClusterUpdater != null && _deferredClusterUpdater.isAlive()) {
+      // Otherwise defer the update
       _externalViewChangeCount.incrementAndGet();
     } else {
       LOGGER.warn("Deferred cluster updater thread is null or stopped, not deferring external view routing table rebuild");
@@ -108,7 +118,12 @@ public class ClusterChangeMediator implements LiveInstanceChangeListener, Extern
 
   @Override
   public void onInstanceConfigChange(List<InstanceConfig> instanceConfigs, NotificationContext context) {
-    if (_deferredClusterUpdater != null && _deferredClusterUpdater.isAlive()) {
+    // If it's been a while since we last updated the instance configs, update the routing table immediately
+    if (MAX_TIME_BEFORE_IMMEDIATE_UPDATE_MILLIS < System.currentTimeMillis() - _lastInstanceConfigUpdateTime) {
+      _helixExternalViewBasedRouting.processInstanceConfigChange();
+      _lastInstanceConfigUpdateTime = System.currentTimeMillis();
+    } else if (_deferredClusterUpdater != null && _deferredClusterUpdater.isAlive()) {
+      // Otherwise defer the update
       _instanceConfigChangeCount.incrementAndGet();
     } else {
       LOGGER.warn("Deferred cluster updater thread is null or stopped, not deferring instance config change notification");
